@@ -4,6 +4,7 @@
  */
 
 import { type IOdspAuthRequestInfo, authRequestWithRetry } from "./odspAuth.js";
+import { isOdspHostname, isPushChannelHostname } from "./odspDocLibUtils.js";
 
 // eslint-disable-next-line jsdoc/require-description -- TODO: Add documentation
 /**
@@ -13,6 +14,7 @@ export async function getAsync(
 	url: string,
 	authRequestInfo: IOdspAuthRequestInfo,
 ): Promise<Response> {
+	assertOdspAuthHost(url);
 	return authRequest(authRequestInfo, async (config: RequestInit) => fetch(url, config));
 }
 
@@ -24,6 +26,7 @@ export async function putAsync(
 	url: string,
 	authRequestInfo: IOdspAuthRequestInfo,
 ): Promise<Response> {
+	assertOdspAuthHost(url);
 	return authRequest(authRequestInfo, async (config: RequestInit) => {
 		const putConfig = {
 			...config,
@@ -42,6 +45,7 @@ export async function postAsync(
 	body: BodyInit | undefined,
 	authRequestInfo: IOdspAuthRequestInfo,
 ): Promise<Response> {
+	assertOdspAuthHost(url);
 	return authRequest(authRequestInfo, async (config: RequestInit) => {
 		const postConfig = {
 			...config,
@@ -72,6 +76,30 @@ async function authRequest(
 	return authRequestWithRetry(authRequestInfo, async (config: RequestInit) =>
 		safeRequestCore(async () => requestCallback(config)),
 	);
+}
+
+/**
+ * Guard the ODSP auth choke point: refuse to attach an `Authorization` header to a request for a host
+ * that is not a trusted ODSP endpoint, or over a non-HTTPS connection (localhost excepted). This keeps
+ * bearer tokens from ever being sent to an arbitrary or plaintext origin.
+ */
+function assertOdspAuthHost(url: string): void {
+	let host: string;
+	let protocol: string;
+	try {
+		const parsed = new URL(url);
+		host = parsed.hostname;
+		protocol = parsed.protocol;
+	} catch {
+		throw new Error("Refusing to attach Authorization header to an invalid URL");
+	}
+	const isLocalhost = host === "localhost";
+	if (!(isOdspHostname(host) || isPushChannelHostname(host) || isLocalhost)) {
+		throw new Error(`Refusing to attach Authorization header for non-ODSP host: ${host}`);
+	}
+	if (protocol !== "https:" && !isLocalhost) {
+		throw new Error(`Refusing to attach Authorization header over non-HTTPS to host: ${host}`);
+	}
 }
 
 async function safeRequestCore(requestCallback: () => Promise<Response>): Promise<Response> {
