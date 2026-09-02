@@ -7,7 +7,6 @@ import { statSync } from "node:fs";
 import {
 	DEFAULT_INTERDEPENDENCY_RANGE,
 	type InterdependencyRange,
-	type VersionBumpType,
 } from "@fluid-tools/version-tools";
 import { MonoRepo } from "@fluidframework/build-tools";
 import { lilconfigSync } from "lilconfig";
@@ -54,17 +53,6 @@ export interface FlubConfig {
 	bump?: BumpConfig;
 
 	/**
-	 * A mapping of branch names to previous version baseline styles. The type test generator takes this information
-	 * into account when calculating the baseline version to use when it's run on a particular branch. If this is not
-	 * defined for a branch or package, then that package will be skipped during type test generation.
-	 *
-	 * @deprecated This setting is no longer used and will be removed in the future.
-	 */
-	branchReleaseTypes?: {
-		[name: string]: VersionBumpType | PreviousVersionStyle;
-	};
-
-	/**
 	 * Configuration for the `generate:releaseNotes` command.
 	 */
 	releaseNotes?: ReleaseNotesConfig;
@@ -86,77 +74,6 @@ export interface ReleaseReportConfig {
 	 */
 	legacyCompatInterval: Record<ReleaseGroup | string, number>;
 }
-
-/**
- * A type representing the different version constraint styles we use when determining the previous version for type
- * test generation.
- *
- * The "base" versions are calculated by zeroing out all version segments lower than the base. That is, for a version v,
- * the baseMajor version is `${v.major}.0.0` and the baseMinor version is `${v.major}.${v.minor}.0`.
- *
- * The "previous" versions work similarly, but the major/minor/patch segment is reduced by 1. That is, for a version v,
- * the previousMajor version is `${min(v.major - 1, 1)}.0.0`, the previousMinor version is
- * `${v.major}.${min(v.minor - 1, 0)}.0`, and the previousPatch is `${v.major}.${v.minor}.${min(v.patch - 1, 0)}.0`.
- *
- * The "previous" versions never roll back below 1 for the major version and 0 for minor and patch. That is, the
- * previousMajor, previousMinor, and previousPatch versions for `1.0.0` are all `1.0.0`.
- *
- * @example
- *
- * Given the version 2.3.5:
- *
- * baseMajor: 2.0.0
- * baseMinor: 2.3.0
- * ~baseMinor: ~2.3.0
- * previousPatch: 2.3.4
- * previousMinor: 2.2.0
- * previousMajor: 1.0.0
- * ^previousMajor: ^1.0.0
- * ^previousMinor: ^2.2.0
- * ~previousMajor: ~1.0.0
- * ~previousMinor: ~2.2.0
- *
- * @example
- *
- * Given the version 2.0.0-internal.2.3.5:
- *
- * baseMajor: 2.0.0-internal.2.0.0
- * baseMinor: 2.0.0-internal.2.3.0
- * ~baseMinor: \>=2.0.0-internal.2.3.0 \<2.0.0-internal.3.0.0
- * previousPatch: 2.0.0-internal.2.3.4
- * previousMinor: 2.0.0-internal.2.2.0
- * previousMajor: 2.0.0-internal.1.0.0
- * ^previousMajor: \>=2.0.0-internal.1.0.0 \<2.0.0-internal.2.0.0
- * ^previousMinor: \>=2.0.0-internal.2.2.0 \<2.0.0-internal.3.0.0
- * ~previousMajor: \>=2.0.0-internal.1.0.0 \<2.0.0-internal.1.1.0
- * ~previousMinor: \>=2.0.0-internal.2.2.0 \<2.0.0-internal.2.2.0
- *
- * @example
- *
- * Given the version 2.0.0-internal.2.0.0:
- *
- * baseMajor: 2.0.0-internal.2.0.0
- * baseMinor: 2.0.0-internal.2.0.0
- * ~baseMinor: \>=2.0.0-internal.2.0.0 \<2.0.0-internal.2.1.0
- * previousPatch: 2.0.0-internal.2.0.0
- * previousMinor: 2.0.0-internal.2.0.0
- * previousMajor: 2.0.0-internal.1.0.0
- * ^previousMajor: \>=2.0.0-internal.1.0.0 \<2.0.0-internal.2.0.0
- * ^previousMinor: \>=2.0.0-internal.2.0.0 \<2.0.0-internal.3.0.0
- * ~previousMajor: \>=2.0.0-internal.1.0.0 \<2.0.0-internal.1.1.0
- * ~previousMinor: \>=2.0.0-internal.2.0.0 \<2.0.0-internal.2.1.0
- */
-export type PreviousVersionStyle =
-	| "baseMajor"
-	| "baseMinor"
-	| "previousPatch"
-	| "previousMinor"
-	| "previousMajor"
-	| "~baseMinor"
-	| "^previousMajor"
-	| "^previousMinor"
-	| "~previousMajor"
-	| "~previousMinor";
 
 /**
  * A short name for the section. Each section in a {@link ReleaseNotesConfig} must have a unique name.

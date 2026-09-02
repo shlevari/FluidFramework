@@ -825,15 +825,6 @@ module.exports = {
 		},
 	},
 
-	// This defines the branch release types for type tests. It applies only to the client release group. Settings for
-	// other release groups is in their root fluid-build config.
-	branchReleaseTypes: {
-		"main": "minor",
-		"lts": "minor",
-		"release/**": "patch",
-		"next": "major",
-	},
-
 	releaseNotes: {
 		sections: {
 			// Note: Breaking changes should be reserved for major releases, which practically speaking means server.

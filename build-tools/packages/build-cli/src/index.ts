@@ -13,7 +13,6 @@ export type {
 	PackageNamePolicyConfig,
 	PackageRequirements,
 	PolicyConfig,
-	PreviousVersionStyle,
 	ReleaseNotesConfig,
 	ReleaseNotesSection,
 	ReleaseNotesSectionName,

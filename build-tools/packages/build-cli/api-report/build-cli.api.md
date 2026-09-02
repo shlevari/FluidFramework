@@ -6,7 +6,6 @@
 
 import { InterdependencyRange } from '@fluid-tools/version-tools';
 import { run } from '@oclif/core';
-import { VersionBumpType } from '@fluid-tools/version-tools';
 
 // @public
 export interface AssertTaggingConfig {
@@ -28,10 +27,6 @@ export interface BumpConfig {
 // @public
 export interface FlubConfig {
     assertTagging?: AssertTaggingConfig;
-    // @deprecated
-    branchReleaseTypes?: {
-        [name: string]: VersionBumpType | PreviousVersionStyle;
-    };
     bump?: BumpConfig;
     policy?: PolicyConfig;
     releaseNotes?: ReleaseNotesConfig;
@@ -88,9 +83,6 @@ export interface PolicyConfig {
     pnpmSinglePackageWorkspace?: string[];
     publicPackageRequirements?: PackageRequirements;
 }
-
-// @public
-export type PreviousVersionStyle = "baseMajor" | "baseMinor" | "previousPatch" | "previousMinor" | "previousMajor" | "~baseMinor" | "^previousMajor" | "^previousMinor" | "~previousMajor" | "~previousMinor";
 
 // @public
 export type ReleaseGroup = (typeof knownReleaseGroups)[number];
