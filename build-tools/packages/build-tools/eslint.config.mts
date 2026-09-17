@@ -29,7 +29,6 @@ export default [
 			"@typescript-eslint/no-misused-promises": "off",
 			"@typescript-eslint/await-thenable": "off",
 			"@typescript-eslint/prefer-string-starts-ends-with": "off",
-			"@typescript-eslint/prefer-includes": "off",
 			"@typescript-eslint/no-dynamic-delete": "off",
 			"@typescript-eslint/prefer-for-of": "off",
 			"@typescript-eslint/only-throw-error": "off",

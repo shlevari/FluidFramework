@@ -52,7 +52,7 @@ export class NpmDepChecker {
 	) {
 		if (checkFiles.length !== 0 && pkg.packageJson.dependencies) {
 			for (const name of Object.keys(pkg.packageJson.dependencies)) {
-				if (this.ignored.indexOf(name) !== -1) {
+				if (this.ignored.includes(name)) {
 					continue;
 				}
 				let packageName = name;
@@ -111,7 +111,7 @@ export class NpmDepChecker {
 					this.foundTypes.push(name);
 				}
 			} else if (!depCheckRecord.found) {
-				if (this.dev.indexOf(name) != -1) {
+				if (this.dev.includes(name)) {
 					console.warn(`${this.pkg.nameColored}: warning: misplaced dependency ${name}`);
 					if (apply) {
 						if (!this.pkg.packageJson.devDependencies) {
@@ -143,7 +143,7 @@ export class NpmDepChecker {
 	private depcheckTypes(apply: boolean): boolean {
 		let changed = false;
 		for (const { name: dep } of this.pkg.combinedDependencies) {
-			if (dep.startsWith("@types/") && this.foundTypes.indexOf(dep) === -1) {
+			if (dep.startsWith("@types/") && !this.foundTypes.includes(dep)) {
 				const typePkgName = dep.substring("@types/".length);
 				const altName = this.altTyping.get(typePkgName);
 				if (
