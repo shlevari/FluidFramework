@@ -8,7 +8,7 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { Flags } from "@oclif/core";
-import * as JSON5 from "json5";
+import JSON5 from "json5";
 import { type ImportDeclaration, ModuleKind, Project, type SourceFile } from "ts-morph";
 import { ApiLevel, isKnownApiLevel } from "../../library/apiLevel.js";
 import { BaseCommand } from "../../library/commands/base.js";
@@ -66,6 +66,19 @@ const exportPathOrder = {
 	[ExportPath.LegacyAlpha]: 5,
 	[ExportPath.Internal]: 6,
 } as const satisfies { [key in ExportPath]: number };
+
+/**
+ * Entry point preference for selecting where a symbol should be imported from.
+ */
+const exportPathSelectionOrder = [
+	ExportPath.Public,
+	ExportPath.Beta,
+	ExportPath.Legacy,
+	ExportPath.LegacyBeta,
+	ExportPath.Alpha,
+	ExportPath.LegacyAlpha,
+	ExportPath.Internal,
+] as const satisfies readonly ExportPath[];
 
 /**
  * FF packages that exist outside of a scope that starts with `@fluid`.
@@ -660,17 +673,47 @@ class ApiLevelReader {
 	}
 
 	private loadPackageData(packageName: PackageName): NamedExportToPath | undefined {
-		const internalImport = this.tempSource.addImportDeclaration({
-			moduleSpecifier: `${packageName}/internal`,
-		});
-		const internalSource = internalImport.getModuleSpecifierSourceFile();
+		const internalSource = this.getSourceFileForExportPath(packageName, ExportPath.Internal);
 		if (internalSource === undefined) {
 			this.log.warning(`no /internal export from ${packageName}`);
 			return undefined;
 		}
-		this.log.verbose(`Loading ${packageName} API data from ${internalSource.getFilePath()}`);
 
-		const exports = getApiExports(internalSource, "warnForMissing", this.log);
+		const memberData = new Map<string, ExportPath>();
+		for (const exportPath of exportPathSelectionOrder) {
+			const sourceFile =
+				exportPath === ExportPath.Internal
+					? internalSource
+					: this.getSourceFileForExportPath(packageName, exportPath);
+			if (sourceFile !== undefined) {
+				this.addPackageExportsToMap(packageName, sourceFile, exportPath, memberData);
+			}
+		}
+		return memberData;
+	}
+
+	private getSourceFileForExportPath(
+		packageName: PackageName,
+		exportPath: ExportPath,
+	): SourceFile | undefined {
+		const moduleSpecifier =
+			exportPath === ExportPath.Public ? packageName : `${packageName}/${exportPath}`;
+		return this.tempSource
+			.addImportDeclaration({
+				moduleSpecifier,
+			})
+			.getModuleSpecifierSourceFile();
+	}
+
+	private addPackageExportsToMap(
+		packageName: PackageName,
+		sourceFile: SourceFile,
+		exportPath: ExportPath,
+		nameToExportPathMap: NamedExportToPath,
+	): void {
+		this.log.verbose(`Loading ${packageName} API data from ${sourceFile.getFilePath()}`);
+
+		const exports = getApiExports(sourceFile, "warnForMissing", this.log);
 		for (const name of exports.unknown.keys()) {
 			// Suppress any warning for EventEmitter as this export is currently a special case.
 			// See AB#7377 for replacement status upon which this can be removed.
@@ -679,76 +722,37 @@ class ApiLevelReader {
 			}
 		}
 
-		const memberData = new Map<string, ExportPath>();
-		addUniqueNamedExportsToMap(exports.public, memberData, ExportPath.Public);
-		if (this.onlyInternal) {
-			addUniqueNamedExportsToMap(exports.alpha, memberData, ExportPath.Internal);
-			addUniqueNamedExportsToMap(exports.beta, memberData, ExportPath.Internal);
+		const selectedExportPath =
+			this.onlyInternal && exportPath !== ExportPath.Public ? ExportPath.Internal : exportPath;
+		addPackageDiscoveredNamedExportsToMap(
+			getKnownNamedExports(exports),
+			nameToExportPathMap,
+			selectedExportPath,
+		);
+	}
+}
 
-			addUniqueNamedExportsToMap(exports.legacyAlpha, memberData, ExportPath.Internal);
-			addUniqueNamedExportsToMap(exports.legacyBeta, memberData, ExportPath.Internal);
-			addUniqueNamedExportsToMap(exports.legacyPublic, memberData, ExportPath.Internal);
-		} else {
-			// #region Handle imports for API levels that have had different historical path mappings (with backwards compatibility)
+function getKnownNamedExports(exports: ReturnType<typeof getApiExports>): { name: string }[] {
+	return [
+		...exports.public,
+		...exports.beta,
+		...exports.legacyPublic,
+		...exports.legacyBeta,
+		...exports.alpha,
+		...exports.legacyAlpha,
+		...exports.internal,
+	];
+}
 
-			const exportSetsWithFallbacks = [
-				// @alpha APIs have been mapped to both "/alpha" and "/legacy" paths.
-				// Later @legacy tag was added explicitly.
-				// Check for a "/alpha" export to map @alpha as "/alpha".
-				// Otherwise, map all @alpha APIs to "/legacy".
-				{
-					apiLevel: ApiLevel.alpha,
-					preferredPath: ExportPath.Alpha,
-					fallbackPath: ExportPath.Legacy,
-				},
-
-				// Historically, all @legacy APIs were mapped to "/legacy".
-				// Now, we support separate paths for all release levels with @legacy APIs.
-				// Check for a "/legacy/alpha" export to map @legacy + @alpha as "legacy/alpha" and map @legacy + @beta to "/legacy".
-				// Otherwise, map all @legacy APIs to /legacy.
-				{
-					apiLevel: ApiLevel.legacyAlpha,
-					preferredPath: ExportPath.LegacyAlpha,
-					fallbackPath: ExportPath.Legacy,
-				},
-				{
-					apiLevel: ApiLevel.legacyBeta,
-					preferredPath: ExportPath.LegacyBeta,
-					fallbackPath: ExportPath.Legacy,
-				},
-			];
-
-			for (const { apiLevel: level, preferredPath, fallbackPath } of exportSetsWithFallbacks) {
-				const levelExports = exports[level];
-				if (levelExports.length > 0) {
-					const usePreferredExportPath =
-						this.tempSource
-							.addImportDeclaration({
-								moduleSpecifier: `${packageName}/${preferredPath}`,
-							})
-							.getModuleSpecifierSourceFile() !== undefined;
-
-					if (!usePreferredExportPath) {
-						this.log.verbose(
-							`Preferred export path "${preferredPath}" for level "${level}" was not found. Will use "${fallbackPath}" instead.`,
-						);
-					}
-
-					addUniqueNamedExportsToMap(
-						levelExports,
-						memberData,
-						usePreferredExportPath ? preferredPath : fallbackPath,
-					);
-				}
-			}
-
-			// #endregion
-
-			addUniqueNamedExportsToMap(exports.beta, memberData, ExportPath.Beta);
-			addUniqueNamedExportsToMap(exports.legacyPublic, memberData, ExportPath.Legacy);
+function addPackageDiscoveredNamedExportsToMap(
+	exports: { name: string }[],
+	nameToExportPathMap: NamedExportToPath,
+	exportPath: ExportPath,
+): void {
+	for (const { name } of exports) {
+		if (!nameToExportPathMap.has(name)) {
+			nameToExportPathMap.set(name, exportPath);
 		}
-		addUniqueNamedExportsToMap(exports.internal, memberData, ExportPath.Internal);
-		return memberData;
 	}
 }
 
