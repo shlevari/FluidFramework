@@ -15,6 +15,7 @@ export type {
 	DDSFuzzTestState,
 	DDSFuzzHarnessEvents,
 	DDSRandom,
+	DDSFuzzClientVersioningOptions,
 	Synchronize,
 } from "./ddsFuzzHarness.js";
 export {

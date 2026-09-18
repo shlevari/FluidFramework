@@ -18,11 +18,22 @@
 		},
 		"./mocharc-common": {
 			"import": "./lib/mocharcCommon.js"
+		},
+		"./versioned-apis": {
+			"import": {
+				"types": "./lib/versionedApis.d.ts",
+				"default": "./lib/versionedApis.js"
+			},
+			"require": {
+				"types": "./dist/versionedApis.d.ts",
+				"default": "./dist/versionedApis.js"
+			}
 		}
 	},
 	"scripts": {
 		"build": "fluid-build . --task build",
 		"build:api-reports": "api-extractor run --local --config api-extractor/api-extractor-report.json",
+		"build:cjs": "fluid-tsc commonjs --project ./tsconfig.versioned-apis.cjs.json && copyfiles -f ../../../common/build/build-common/src/cjs/package.json ./dist",
 		"build:compile": "fluid-build . --task compile",
 		"build:docs": "api-extractor run --local --config api-extractor/api-extractor-model.json",
 		"build:esm": "tsc --project ./tsconfig.json",

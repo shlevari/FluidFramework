@@ -55,6 +55,17 @@ See documentation on `createDDSFuzzSuite` and `DDSFuzzModel` for more details.
 The harness currently supports testing eventual consistency of op application using Fluid's set of [mocks](../../runtime/test-runtime-utils/README.md)
 including the reconnect flow.
 
+### Cross-version DDS fuzz tests
+
+The fuzz harness can run different clients with different DDS package versions without depending on any version-loading
+infrastructure. A caller supplies exact version strings through `clientVersioning` and a synchronous `factoryForVersion`
+resolver. The resolver must be backed by whatever package-specific loading mechanism the caller uses, and all exact versions
+must be loaded before any fuzz test invokes it.
+
+The harness records selected versions in generated lifecycle operations so replay and minimization do not depend on ambient
+configuration. Load data also carries the producing channel's attributes, and loading paths pass those source attributes to the
+target factory so cross-version loads use the format metadata written by the source client.
+
 ### Future Improvements
 
 The generic aspects of this model could be improved to fuzz test correctness a few other general concerns DDS authors have:

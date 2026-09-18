@@ -9,9 +9,19 @@ import * as path from "node:path";
 
 import { TypedEventEmitter } from "@fluid-internal/client-utils";
 import type { AsyncGenerator, BaseOperation } from "@fluid-private/stochastic-test-utils";
-import { chainAsync, done, takeAsync } from "@fluid-private/stochastic-test-utils";
+import {
+	asyncGeneratorFromArray,
+	chainAsync,
+	done,
+	takeAsync,
+} from "@fluid-private/stochastic-test-utils";
 import { Counter } from "@fluid-private/stochastic-test-utils/internal/test/utils";
-import type { IChannelFactory } from "@fluidframework/datastore-definitions/internal";
+import type {
+	IChannelAttributes,
+	IChannelFactory,
+	IChannelServices,
+	IFluidDataStoreRuntime,
+} from "@fluidframework/datastore-definitions/internal";
 import {
 	MockContainerRuntimeFactoryForReconnection,
 	MockFluidDataStoreRuntime,
@@ -43,10 +53,56 @@ import {
 } from "../ddsFuzzHarness.js";
 
 import { _dirname } from "./dirname.cjs";
-import type { Operation, SharedNothingFactory } from "./sharedNothing.js";
-import { baseModel, isNoopOp } from "./sharedNothing.js";
+import type { Operation } from "./sharedNothing.js";
+import { baseModel, isNoopOp, SharedNothingFactory } from "./sharedNothing.js";
 
 type Model = DDSFuzzModel<SharedNothingFactory, Operation | ChangeConnectionState>;
+
+const createVersion = "1.0.0";
+const loadVersion = "2.0.0";
+
+class VersionedSharedNothingFactory extends SharedNothingFactory {
+	public readonly loadedAttributes: IChannelAttributes[] = [];
+
+	public constructor(private readonly version: string) {
+		super();
+	}
+
+	public override get attributes(): IChannelAttributes {
+		return {
+			...SharedNothingFactory.Attributes,
+			packageVersion: this.version,
+		};
+	}
+
+	public override async load(
+		runtime: IFluidDataStoreRuntime,
+		id: string,
+		services: IChannelServices,
+		attributes: IChannelAttributes,
+	): ReturnType<SharedNothingFactory["load"]> {
+		this.loadedAttributes.push(attributes);
+		return super.load(runtime, id, services, attributes);
+	}
+}
+
+function makeVersionedFactories(): {
+	factoryForVersion: (version: string) => IChannelFactory;
+	factories: Map<string, VersionedSharedNothingFactory>;
+} {
+	const factories = new Map([
+		[createVersion, new VersionedSharedNothingFactory(createVersion)],
+		[loadVersion, new VersionedSharedNothingFactory(loadVersion)],
+	]);
+	return {
+		factories,
+		factoryForVersion: (version: string) => {
+			const factory = factories.get(version);
+			assert(factory !== undefined, `Unexpected version ${version}`);
+			return factory;
+		},
+	};
+}
 
 /**
  * Mixes in spying functionality to a DDS fuzz model.
@@ -115,6 +171,37 @@ const defaultOptions: DDSFuzzSuiteOptions = {
 	...defaultDDSFuzzSuiteOptions,
 	detachedStartOptions: { numOpsBeforeAttach: 0 },
 };
+
+function makeVersionedOptions(
+	factoryForVersion: (version: string) => IChannelFactory,
+): DDSFuzzSuiteOptions {
+	return {
+		...defaultOptions,
+		numberOfClients: 3,
+		detachedStartOptions: {
+			numOpsBeforeAttach: 1,
+			attachingBeforeRehydrateDisable: true,
+		},
+		clientJoinOptions: {
+			maxNumberOfClients: 4,
+			clientAddProbability: 1,
+			stashableClientProbability: 1,
+		},
+		clientVersioning: {
+			versionPair: { createVersion, loadVersion },
+			initialTopology: {
+				detachedClientVersion: createVersion,
+				attachLoadClientVersion: loadVersion,
+				clientVersions: [loadVersion, loadVersion, createVersion],
+			},
+			dynamicAddClientVersions: [createVersion],
+			rehydrateClientVersion: loadVersion,
+		},
+		factoryForVersion,
+		rollbackProbability: 0,
+		rebaseProbability: 0,
+	};
+}
 
 describe("DDS Fuzz Harness", () => {
 	// This harness relies on some specific behavior of the shared mocks: putting acceptance tests here
@@ -713,7 +800,251 @@ describe("DDS Fuzz Harness", () => {
 		});
 	});
 
-	describe("mixinStashClient", () => {});
+	describe("client versioning", () => {
+		it("applies lifecycle versions and preserves source channel attributes", async () => {
+			const { factories, factoryForVersion } = makeVersionedFactories();
+			const emitter = new TypedEventEmitter<DDSFuzzHarnessEvents>();
+			const clientCreations: { id: string; version: string | undefined }[] = [];
+			emitter.on("clientCreate", (client) => {
+				clientCreations.push({
+					id: client.channel.id,
+					version: client.clientVersion,
+				});
+			});
+			const options = {
+				...makeVersionedOptions(factoryForVersion),
+				emitter,
+			};
+			const { model, generatedOperations } = mixinSpying(
+				mixinAttach(
+					mixinNewClient(
+						{
+							...baseModel,
+							generatorFactory: () => takeAsync(8, baseModel.generatorFactory()),
+						},
+						options,
+					),
+					options,
+				),
+			);
+
+			const finalState = await runTestForSeed(model, options, 0);
+
+			assert.deepEqual(clientCreations.slice(0, 2), [
+				{ id: "A", version: createVersion },
+				{ id: "A", version: loadVersion },
+			]);
+			const sortedCreations = [...clientCreations].sort((a, b) =>
+				`${a.id}:${a.version}`.localeCompare(`${b.id}:${b.version}`),
+			);
+			assert.deepEqual(sortedCreations, [
+				{ id: "A", version: createVersion },
+				{ id: "A", version: loadVersion },
+				{ id: "B", version: loadVersion },
+				{ id: "C", version: createVersion },
+				{ id: "D", version: createVersion },
+				{ id: "summarizer", version: loadVersion },
+			]);
+			assert.deepEqual(
+				finalState.clients.map((client) => client.clientVersion),
+				[loadVersion, loadVersion, createVersion, createVersion],
+			);
+			assert.equal(finalState.summarizerClient.clientVersion, loadVersion);
+			const rehydrateOperation = generatedOperations.find(
+				(operation) => operation !== done && operation.type === "rehydrate",
+			);
+			assert.equal(
+				(rehydrateOperation as { clientVersion?: string }).clientVersion,
+				loadVersion,
+			);
+			const addClientOperation = generatedOperations.find(
+				(operation) => operation !== done && operation.type === "addClient",
+			);
+			assert.equal(
+				(addClientOperation as { clientVersion?: string }).clientVersion,
+				createVersion,
+			);
+			assert(
+				factories
+					.get(loadVersion)
+					?.loadedAttributes.some((attributes) => attributes.packageVersion === createVersion),
+				"Expected load-side factory to receive source channel attributes from create-side summary",
+			);
+		});
+
+		it("replays serialized add-client versions instead of ambient candidates", async () => {
+			const { factoryForVersion } = makeVersionedFactories();
+			const options = {
+				...makeVersionedOptions(factoryForVersion),
+				detachedStartOptions: {
+					numOpsBeforeAttach: 0,
+				},
+				numberOfClients: 1,
+				clientJoinOptions: {
+					maxNumberOfClients: 2,
+					clientAddProbability: 0,
+				},
+				clientVersioning: {
+					versionPair: { createVersion, loadVersion },
+					initialTopology: {
+						detachedClientVersion: createVersion,
+						attachLoadClientVersion: loadVersion,
+						clientVersions: [createVersion],
+					},
+					dynamicAddClientVersions: [createVersion],
+				},
+			};
+			const addClientOperation = {
+				type: "addClient",
+				addedClientId: "D",
+				canBeStashed: false,
+				clientVersion: loadVersion,
+			} as const;
+			const model = {
+				...mixinNewClient(baseModel, options),
+				generatorFactory: () => asyncGeneratorFromArray([addClientOperation]),
+			};
+
+			const finalState = await runTestForSeed(model, options, 0);
+
+			const replayedClient = finalState.clients.find(
+				(client) => client.channel.id === addClientOperation.addedClientId,
+			);
+			assert.equal(replayedClient?.clientVersion, loadVersion);
+		});
+
+		it("serializes the detached source version when rehydrateClientVersion is omitted", async () => {
+			const { factoryForVersion } = makeVersionedFactories();
+			const baseOptions = makeVersionedOptions(factoryForVersion);
+			const baseVersioning = baseOptions.clientVersioning;
+			assert(baseVersioning !== undefined);
+			const options = {
+				...baseOptions,
+				clientVersioning: {
+					versionPair: baseVersioning.versionPair,
+					initialTopology: {
+						...baseVersioning.initialTopology,
+						clientVersions: [createVersion, loadVersion, createVersion],
+					},
+					dynamicAddClientVersions: baseVersioning.dynamicAddClientVersions,
+				},
+			};
+			const { model, generatedOperations } = mixinSpying(
+				mixinAttach(
+					{
+						...baseModel,
+						generatorFactory: () => takeAsync(2, baseModel.generatorFactory()),
+					},
+					options,
+				),
+			);
+
+			const finalState = await runTestForSeed(model, options, 0);
+
+			const rehydrateOperation = generatedOperations.find(
+				(operation) => operation !== done && operation.type === "rehydrate",
+			);
+			assert.equal(
+				(rehydrateOperation as { clientVersion?: string }).clientVersion,
+				createVersion,
+			);
+			assert.equal(finalState.clients[0].clientVersion, createVersion);
+		});
+
+		it("rejects detached topology that cannot retain the requested first client version", async () => {
+			const { factoryForVersion } = makeVersionedFactories();
+			const options = {
+				...makeVersionedOptions(factoryForVersion),
+				detachedStartOptions: {
+					numOpsBeforeAttach: 1,
+					rehydrateDisabled: true as const,
+				},
+				clientVersioning: {
+					versionPair: { createVersion, loadVersion },
+					initialTopology: {
+						detachedClientVersion: createVersion,
+						attachLoadClientVersion: loadVersion,
+						clientVersions: [loadVersion, loadVersion, createVersion],
+					},
+					dynamicAddClientVersions: [createVersion],
+				},
+			};
+
+			await assert.rejects(
+				runTestForSeed(baseModel, options, 0),
+				/initialTopology\.clientVersions\[0] must match/,
+			);
+		});
+
+		it("keeps add-client versions during minimization", () => {
+			const { factoryForVersion } = makeVersionedFactories();
+			const options = makeVersionedOptions(factoryForVersion);
+			const model = mixinNewClient(baseModel, options);
+			const addClientOperation: {
+				type: "addClient";
+				addedClientId: string;
+				canBeStashed: boolean;
+				clientVersion: string;
+			} = {
+				type: "addClient",
+				addedClientId: "D",
+				canBeStashed: true,
+				clientVersion: loadVersion,
+			};
+
+			for (const transform of model.minimizationTransforms ?? []) {
+				transform(addClientOperation);
+			}
+
+			assert.equal(addClientOperation.canBeStashed, false);
+			assert.equal(addClientOperation.clientVersion, loadVersion);
+		});
+
+		it("uses serialized stash replacement versions", async () => {
+			const { factoryForVersion } = makeVersionedFactories();
+			const stashClientOperation = {
+				type: "stashClient",
+				existingClientId: "A",
+				newClientId: "A_1",
+				clientVersion: loadVersion,
+			} as const;
+			const options = {
+				...makeVersionedOptions(factoryForVersion),
+				detachedStartOptions: {
+					numOpsBeforeAttach: 0,
+				},
+				numberOfClients: 1,
+				clientJoinOptions: {
+					maxNumberOfClients: 1,
+					clientAddProbability: 0,
+					stashableClientProbability: 1,
+				},
+				clientVersioning: {
+					versionPair: { createVersion, loadVersion },
+					initialTopology: {
+						detachedClientVersion: createVersion,
+						attachLoadClientVersion: loadVersion,
+						clientVersions: [createVersion],
+					},
+					dynamicAddClientVersions: [createVersion],
+				},
+			};
+			const model = {
+				...mixinStashedClient(baseModel, options),
+				generatorFactory: () => asyncGeneratorFromArray([stashClientOperation]),
+			};
+
+			const finalState = await runTestForSeed(model, options, 0);
+
+			assert.deepEqual(
+				finalState.clients.map((client) => ({
+					id: client.channel.id,
+					version: client.clientVersion,
+				})),
+				[{ id: stashClientOperation.newClientId, version: loadVersion }],
+			);
+		});
+	});
 
 	describe("events", () => {
 		describe("clientCreate", () => {

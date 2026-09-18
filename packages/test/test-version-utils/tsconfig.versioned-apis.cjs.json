@@ -1,0 +1,10 @@
+{
+	// This config must be used in a "type": "commonjs" environment. (Use fluid-tsc commonjs.)
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"composite": false,
+		"outDir": "./dist",
+	},
+	"files": ["src/versionedApis.ts"],
+	"include": [],
+}

@@ -69,3 +69,11 @@ export {
 	type GetRequestedVersionOptions,
 	versionToComparisonNumber,
 } from "./versionUtils.js";
+export {
+	ensureCompatVersionPairLoaded,
+	enumerateCrossClientCompatVersionPairs,
+	getLoadedCompatApisForVersionPair,
+	type DDSFuzzClientVersioningTopologyDescriptor,
+	type OrderedCompatVersionPairDescriptor,
+	type VersionedCompatApis,
+} from "./versionedApis.js";

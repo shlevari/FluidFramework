@@ -145,6 +145,16 @@ resolve the latest version that matches it.
 OPEN ISSUE: while these API can be used directly, currently the default global mocha hook will still run and install the
 default set of legacy versions whether it is necessary or not.
 
+### TLA-free cross-client descriptors
+
+CommonJS-built test packages should avoid importing the root `@fluid-private/test-version-utils` entry point when they only need
+cross-client version selection, since that entry point also exposes mocha helpers with top-level setup. Instead, import
+`@fluid-private/test-version-utils/versioned-apis`.
+
+Use `enumerateCrossClientCompatVersionPairs()` synchronously at suite-definition time to register one suite per ordered exact
+version pair. In each suite's async mocha `before` hook, call `ensureCompatVersionPairLoaded(descriptor)`. Tests can then call
+`getLoadedCompatApisForVersionPair(descriptor)` synchronously and pass the returned DDS factories to their test harness.
+
 ## Updating compat versions
 
 After a Fluid Framework version bump or after a new compatibility checkpoint is designated, build package dependencies (`pnpm exec fluid-build --task build:esm /test-version-utils$`), and then run the following from this package's directory:

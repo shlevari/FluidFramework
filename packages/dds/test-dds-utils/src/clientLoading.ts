@@ -3,7 +3,10 @@
  * Licensed under the MIT License.
  */
 
-import type { IChannelFactory } from "@fluidframework/datastore-definitions/internal";
+import type {
+	IChannelAttributes,
+	IChannelFactory,
+} from "@fluidframework/datastore-definitions/internal";
 import type { ISummaryTree } from "@fluidframework/driver-definitions";
 import {
 	serializeIdCompressor,
@@ -22,6 +25,7 @@ export interface Client<TChannelFactory extends IChannelFactory> {
 	channel: ReturnType<TChannelFactory["create"]>;
 	dataStoreRuntime: MockFluidDataStoreRuntime;
 	containerRuntime: MockContainerRuntimeForReconnection;
+	clientVersion: string | undefined;
 }
 
 /**
@@ -29,6 +33,8 @@ export interface Client<TChannelFactory extends IChannelFactory> {
  */
 export interface ClientLoadData {
 	minimumSequenceNumber: number;
+	sourceClientVersion: string;
+	sourceChannelAttributes: Readonly<IChannelAttributes>;
 	summaries: {
 		summary: ISummaryTree;
 		idCompressorSummary: FuzzSerializedIdCompressor | undefined;
@@ -74,6 +80,8 @@ export function createLoadData(
 	const compressor = client.dataStoreRuntime.idCompressor;
 	return {
 		minimumSequenceNumber: client.dataStoreRuntime.deltaManagerInternal.lastSequenceNumber,
+		sourceClientVersion: client.clientVersion ?? "unversioned",
+		sourceChannelAttributes: client.channel.attributes,
 		summaries: {
 			summary: client.channel.getAttachSummary().summary,
 			idCompressorSummary:
@@ -105,6 +113,8 @@ export function createLoadDataFromStashData(
 	const compressor = client.dataStoreRuntime.idCompressor;
 	return {
 		minimumSequenceNumber: stashData.minimumSequenceNumber,
+		sourceClientVersion: stashData.sourceClientVersion,
+		sourceChannelAttributes: stashData.sourceChannelAttributes,
 		summaries: {
 			summary: stashData.summaries.summary,
 			idCompressorSummary:

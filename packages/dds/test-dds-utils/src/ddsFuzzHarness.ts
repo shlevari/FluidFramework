@@ -124,6 +124,7 @@ export interface StashClient {
 	type: "stashClient";
 	existingClientId: string;
 	newClientId: string;
+	clientVersion?: string;
 }
 
 /**
@@ -146,6 +147,7 @@ export interface Attaching {
  */
 export interface Rehydrate {
 	type: "rehydrate";
+	clientVersion?: string;
 }
 
 /**
@@ -170,6 +172,7 @@ export interface AddClient {
 	type: "addClient";
 	addedClientId: string;
 	canBeStashed: boolean;
+	clientVersion?: string;
 }
 
 /**
@@ -190,6 +193,25 @@ export type HarnessOperation =
 	| Synchronize
 	| StashClient
 	| Rollback;
+
+/**
+ * Exact-version topology for version-aware DDS fuzz suites.
+ *
+ * @internal
+ */
+export interface DDSFuzzClientVersioningOptions {
+	readonly versionPair: {
+		readonly createVersion: string;
+		readonly loadVersion: string;
+	};
+	readonly initialTopology: {
+		readonly detachedClientVersion: string;
+		readonly attachLoadClientVersion: string;
+		readonly clientVersions: readonly string[];
+	};
+	readonly dynamicAddClientVersions: readonly string[];
+	readonly rehydrateClientVersion?: string;
+}
 
 /**
  * Represents a generic fuzz model for testing eventual consistency of a DDS.
@@ -563,6 +585,17 @@ export interface DDSFuzzSuiteOptions {
 	 * If enabled, connection state change operations will sometimes use squashed resubmits.
 	 */
 	testSquashResubmit?: true;
+
+	/**
+	 * Exact-version topology used by cross-version fuzz tests.
+	 */
+	clientVersioning?: DDSFuzzClientVersioningOptions;
+
+	/**
+	 * Resolves a DDS factory for an exact version. The fuzz harness owns version
+	 * provenance but does not depend on any package-version loading infrastructure.
+	 */
+	factoryForVersion?: (exactVersion: string) => IChannelFactory;
 }
 
 /**
@@ -586,6 +619,159 @@ export const defaultDDSFuzzSuiteOptions: DDSFuzzSuiteOptions = {
 	validationStrategy: { type: "random", probability: 0.05 },
 	rollbackProbability: 0.01,
 };
+
+function sanitizeVersionLabelSegment(segment: string): string {
+	return segment.replace(/[^\d+.A-Za-z-]+/g, "-");
+}
+
+function getClientVersioningLabel(
+	options: Pick<DDSFuzzSuiteOptions, "clientVersioning">,
+): string {
+	const versioning = options.clientVersioning;
+	if (versioning === undefined) {
+		return "";
+	}
+	const {
+		versionPair: { createVersion, loadVersion },
+		initialTopology: { detachedClientVersion, attachLoadClientVersion, clientVersions },
+		rehydrateClientVersion,
+	} = versioning;
+	const parts = [
+		`create-${createVersion}`,
+		`load-${loadVersion}`,
+		`detached-${detachedClientVersion}`,
+		`attachLoad-${attachLoadClientVersion}`,
+		`clients-${clientVersions.join("+")}`,
+	];
+	if (rehydrateClientVersion !== undefined) {
+		parts.push(`rehydrate-${rehydrateClientVersion}`);
+	}
+	return parts.map(sanitizeVersionLabelSegment).join("__");
+}
+
+function getVersionedWorkloadName(
+	workloadName: string,
+	options: Pick<DDSFuzzSuiteOptions, "clientVersioning">,
+): string {
+	const label = getClientVersioningLabel(options);
+	return label === "" ? workloadName : `${workloadName} ${label}`;
+}
+
+function getFactoryForVersion<
+	TChannelFactory extends IChannelFactory,
+	TOperation extends BaseOperation,
+	TState extends DDSFuzzTestState<TChannelFactory>,
+>(
+	model: DDSFuzzHarnessModel<TChannelFactory, TOperation, TState>,
+	options: Pick<DDSFuzzSuiteOptions, "clientVersioning" | "factoryForVersion">,
+	clientVersion: string | undefined,
+): TChannelFactory {
+	if (clientVersion === undefined) {
+		return model.factory;
+	}
+	const factoryForVersion = options.factoryForVersion;
+	if (factoryForVersion === undefined) {
+		throw new Error(
+			`DDS fuzz client versioning requires factoryForVersion for ${clientVersion}`,
+		);
+	}
+	return factoryForVersion(clientVersion) as TChannelFactory;
+}
+
+function pickDynamicAddClientVersion(
+	options: Pick<DDSFuzzSuiteOptions, "clientVersioning">,
+	random: IRandom,
+): string | undefined {
+	const versions = options.clientVersioning?.dynamicAddClientVersions;
+	if (versions === undefined) {
+		return undefined;
+	}
+	assert(versions.length > 0, "dynamicAddClientVersions must not be empty");
+	return random.pick([...versions]);
+}
+
+function getInitialClientVersion(
+	options: Pick<DDSFuzzSuiteOptions, "clientVersioning">,
+	index: number,
+): string | undefined {
+	return options.clientVersioning?.initialTopology.clientVersions[index];
+}
+
+function getDetachedClientVersion(
+	options: Pick<DDSFuzzSuiteOptions, "clientVersioning">,
+): string | undefined {
+	return options.clientVersioning?.initialTopology.detachedClientVersion;
+}
+
+function getAttachLoadClientVersion(
+	options: Pick<DDSFuzzSuiteOptions, "clientVersioning">,
+): string | undefined {
+	return options.clientVersioning?.initialTopology.attachLoadClientVersion;
+}
+
+function getConfiguredRehydrateClientVersion(
+	options: Pick<DDSFuzzSuiteOptions, "clientVersioning">,
+): string | undefined {
+	const versioning = options.clientVersioning;
+	return (
+		versioning?.rehydrateClientVersion ?? versioning?.initialTopology.detachedClientVersion
+	);
+}
+
+function getRehydrateClientVersion(
+	options: Pick<DDSFuzzSuiteOptions, "clientVersioning">,
+	operation: Rehydrate,
+): string | undefined {
+	return getSerializedClientVersion(options, operation, "rehydrate");
+}
+
+function getSerializedClientVersion(
+	options: Pick<DDSFuzzSuiteOptions, "clientVersioning">,
+	operation: { clientVersion?: string },
+	operationName: string,
+): string | undefined {
+	if (operation.clientVersion !== undefined) {
+		return operation.clientVersion;
+	}
+	if (options.clientVersioning !== undefined) {
+		throw new Error(
+			`${operationName} operation missing serialized clientVersion for ${getClientVersioningLabel(options)}`,
+		);
+	}
+	return undefined;
+}
+
+function validateClientVersioningOptions(
+	options: Pick<
+		DDSFuzzSuiteOptions,
+		"clientVersioning" | "detachedStartOptions" | "factoryForVersion" | "numberOfClients"
+	>,
+): void {
+	if (options.clientVersioning === undefined) {
+		return;
+	}
+	if (options.factoryForVersion === undefined) {
+		throw new Error("clientVersioning requires factoryForVersion");
+	}
+	if (
+		options.clientVersioning.initialTopology.clientVersions.length !== options.numberOfClients
+	) {
+		throw new Error(
+			`clientVersioning initial topology must list exactly ${options.numberOfClients} client versions`,
+		);
+	}
+	if (options.detachedStartOptions.numOpsBeforeAttach !== 0) {
+		const retainedClientVersion =
+			options.detachedStartOptions.rehydrateDisabled === true
+				? options.clientVersioning.initialTopology.detachedClientVersion
+				: getConfiguredRehydrateClientVersion(options);
+		if (options.clientVersioning.initialTopology.clientVersions[0] !== retainedClientVersion) {
+			throw new Error(
+				"clientVersioning initialTopology.clientVersions[0] must match the retained detached or rehydrated client version",
+			);
+		}
+	}
+}
 
 /**
  * Mixes in functionality to add new clients to a DDS fuzz model.
@@ -613,12 +799,14 @@ export function mixinNewClient<
 				!isDetached &&
 				random.bool(options.clientJoinOptions.clientAddProbability)
 			) {
+				const clientVersion = pickDynamicAddClientVersion(options, random);
 				return {
 					type: "addClient",
 					addedClientId: makeFriendlyClientId(random, clients.length),
 					canBeStashed: options.clientJoinOptions?.stashableClientProbability
 						? random.bool(options.clientJoinOptions.stashableClientProbability)
 						: false,
+					...(clientVersion === undefined ? {} : { clientVersion }),
 				};
 			}
 			return baseGenerator(state);
@@ -638,13 +826,15 @@ export function mixinNewClient<
 
 	const reducer: AsyncReducer<TOperation | AddClient, TState> = async (state, op) => {
 		if (isClientAddOp(op)) {
+			const clientVersion = getSerializedClientVersion(options, op, "addClient");
 			const newClient = await loadClient(
 				state.containerRuntimeFactory,
 				state.summarizerClient,
-				model.factory,
+				getFactoryForVersion(model, options, clientVersion),
 				op.addedClientId,
 				options,
 				op.canBeStashed,
+				clientVersion,
 			);
 			state.clients.push(newClient);
 			return state;
@@ -749,7 +939,11 @@ export function mixinAttach<
 		return { type: "attach" };
 	};
 	const rehydrateOp = async (): Promise<TOperation | Attach | Attaching | Rehydrate> => {
-		return { type: "rehydrate" };
+		const clientVersion = getConfiguredRehydrateClientVersion(options);
+		return {
+			type: "rehydrate",
+			...(clientVersion === undefined ? {} : { clientVersion }),
+		};
 	};
 	const generatorFactory: () => AsyncGenerator<
 		TOperation | Attach | Attaching | Rehydrate,
@@ -807,18 +1001,23 @@ export function mixinAttach<
 			};
 			clientA.channel.connect(services);
 			const clients: Client<TChannelFactory>[] = await Promise.all(
-				Array.from({ length: options.numberOfClients }, async (_, index) =>
-					loadClient(
+				Array.from({ length: options.numberOfClients }, async (_, index) => {
+					const clientVersion =
+						index === 0
+							? getAttachLoadClientVersion(options)
+							: getInitialClientVersion(options, index);
+					return loadClient(
 						state.containerRuntimeFactory,
 						clientA,
-						model.factory,
+						getFactoryForVersion(model, options, clientVersion),
 						index === 0 ? "summarizer" : makeFriendlyClientId(state.random, index),
 						options,
 						index !== 0 && options.clientJoinOptions?.stashableClientProbability
 							? state.random.bool(options.clientJoinOptions.stashableClientProbability)
 							: false,
-					),
-				),
+						clientVersion,
+					);
+				}),
 			);
 			// eslint-disable-next-line require-atomic-updates
 			clientA.stashData = undefined;
@@ -848,12 +1047,14 @@ export function mixinAttach<
 			// and that should probably be rectified here. The immediate problem with using `loadDetached` here is that
 			// it finalizes IDs, which is only OK if this rehydrate is happening while the container is detached (not attaching).
 			// See comment on `attachingBeforeRehydrateDisable` for more context.
+			const clientVersion = getRehydrateClientVersion(options, operation);
 			const summarizerClient = await loadDetached(
 				state.containerRuntimeFactory,
 				clientA,
-				model.factory,
+				getFactoryForVersion(model, options, clientVersion),
 				makeFriendlyClientId(state.random, 0),
 				options,
+				clientVersion,
 			);
 
 			await model.validateConsistency(clientA, summarizerClient);
@@ -1218,16 +1419,19 @@ export function mixinStashedClient<
 			);
 
 			if (!state.isDetached && stashable.length > 0 && state.random.bool(0.5)) {
-				const existingClientId = state.random.pick(stashable).channel.id;
+				const existingClient = state.random.pick(stashable);
+				const existingClientId = existingClient.channel.id;
 				const instanceIndex = existingClientId.lastIndexOf("_");
 				const instance =
 					instanceIndex < 0
 						? 0
 						: Number.parseInt(existingClientId.slice(instanceIndex + 1), 10);
+				const clientVersion = existingClient.clientVersion;
 				return {
 					type: "stashClient",
 					existingClientId,
 					newClientId: `${existingClientId}_${instance + 1}`,
+					...(clientVersion === undefined ? {} : { clientVersion }),
 				};
 			}
 			return baseGenerator(state);
@@ -1241,15 +1445,17 @@ export function mixinStashedClient<
 			if (!hasStashData(client)) {
 				throw new ReducerPreconditionError("client not stashable");
 			}
+			const clientVersion = getSerializedClientVersion(options, operation, "stashClient");
 			const loadData = createLoadDataFromStashData(client, client.stashData);
 
 			// load a new client from the same state as the original client
 			const newClient = await loadClientFromSummaries(
 				containerRuntimeFactory,
 				loadData,
-				model.factory,
+				getFactoryForVersion(model, options, clientVersion),
 				operation.newClientId,
 				options,
+				clientVersion,
 			);
 
 			await newClient.containerRuntime.initializeWithStashedOps(client.containerRuntime);
@@ -1308,6 +1514,7 @@ function createDetachedClient<TChannelFactory extends IChannelFactory>(
 	factory: TChannelFactory,
 	clientId: string,
 	options: Omit<DDSFuzzSuiteOptions, "only" | "skip">,
+	clientVersion?: string,
 ): Client<TChannelFactory> {
 	const dataStoreRuntime = new MockFluidDataStoreRuntime({
 		clientId,
@@ -1335,6 +1542,7 @@ function createDetachedClient<TChannelFactory extends IChannelFactory>(
 		containerRuntime,
 		dataStoreRuntime,
 		channel: channel as ReturnType<TChannelFactory["create"]>,
+		clientVersion,
 	};
 	options.emitter.emit("clientCreate", newClient);
 	return newClient;
@@ -1347,6 +1555,7 @@ async function loadClient<TChannelFactory extends IChannelFactory>(
 	clientId: string,
 	options: Omit<DDSFuzzSuiteOptions, "only" | "skip">,
 	supportStashing: boolean = false,
+	clientVersion?: string,
 ): Promise<ClientWithStashData<TChannelFactory>> {
 	const loadData: ClientLoadData =
 		summarizerClient.stashData === undefined
@@ -1358,6 +1567,7 @@ async function loadClient<TChannelFactory extends IChannelFactory>(
 		factory,
 		clientId,
 		options,
+		clientVersion,
 		supportStashing,
 	);
 }
@@ -1394,6 +1604,7 @@ async function loadClientFromSummaries<TChannelFactory extends IChannelFactory>(
 	factory: TChannelFactory,
 	clientId: string,
 	options: Omit<DDSFuzzSuiteOptions, "only" | "skip">,
+	clientVersion?: string,
 	supportStashing: boolean = false,
 ): Promise<ClientWithStashData<TChannelFactory>> {
 	const { summaries, minimumSequenceNumber } = loadData;
@@ -1419,7 +1630,7 @@ async function loadClientFromSummaries<TChannelFactory extends IChannelFactory>(
 		dataStoreRuntime,
 		clientId,
 		services,
-		factory.attributes,
+		loadData.sourceChannelAttributes,
 	)) as ReturnType<TChannelFactory["create"]>;
 	setupFuzzSerializer(channel, dataStoreRuntime);
 	channel.connect(services);
@@ -1429,6 +1640,7 @@ async function loadClientFromSummaries<TChannelFactory extends IChannelFactory>(
 		containerRuntime,
 		dataStoreRuntime,
 		stashData,
+		clientVersion,
 	};
 
 	options.emitter.emit("clientCreate", newClient);
@@ -1441,14 +1653,16 @@ async function loadDetached<TChannelFactory extends IChannelFactory>(
 	factory: TChannelFactory,
 	clientId: string,
 	options: Omit<DDSFuzzSuiteOptions, "only" | "skip">,
+	clientVersion?: string,
 ): Promise<Client<TChannelFactory>> {
 	// as in production, emulate immediate finalizing of IDs when attaching
 	finalizeAllocatedIds(summarizerClient);
 
-	const { summaries } =
+	const loadData =
 		summarizerClient.stashData === undefined
 			? createLoadData(summarizerClient, true)
 			: createLoadDataFromStashData(summarizerClient, summarizerClient.stashData);
+	const { summaries } = loadData;
 
 	const idCompressor = options.idCompressorFactory?.(summaries.idCompressorSummary);
 
@@ -1467,7 +1681,7 @@ async function loadDetached<TChannelFactory extends IChannelFactory>(
 		dataStoreRuntime,
 		clientId,
 		services,
-		factory.attributes,
+		loadData.sourceChannelAttributes,
 	)) as ReturnType<TChannelFactory["create"]>;
 
 	if (summarizerClient.stashData) {
@@ -1478,6 +1692,7 @@ async function loadDetached<TChannelFactory extends IChannelFactory>(
 		channel,
 		containerRuntime,
 		dataStoreRuntime,
+		clientVersion,
 	};
 	options.emitter.emit("clientCreate", newClient);
 	return newClient;
@@ -1519,17 +1734,21 @@ export async function runTestForSeed<
 	seed: number,
 	saveInfo?: SaveInfo,
 ): Promise<DDSFuzzTestState<TChannelFactory>> {
+	validateClientVersioningOptions(options);
 	const random = makeRandom(seed);
 	const containerRuntimeFactory = new MockContainerRuntimeFactoryForReconnection(
 		options.containerRuntimeOptions,
 	);
 
 	const startDetached = options.detachedStartOptions.numOpsBeforeAttach !== 0;
+	const initialClientVersion = getDetachedClientVersion(options);
+	const initialFactory = getFactoryForVersion(model, options, initialClientVersion);
 	const initialClient = createDetachedClient(
 		containerRuntimeFactory,
-		model.factory,
+		initialFactory,
 		startDetached ? makeFriendlyClientId(random, 0) : "summarizer",
 		options,
+		initialClientVersion,
 	);
 	if (!startDetached) {
 		finalizeAllocatedIds(initialClient);
@@ -1544,18 +1763,20 @@ export async function runTestForSeed<
 	const clients = startDetached
 		? [initialClient]
 		: await Promise.all(
-				Array.from({ length: options.numberOfClients }, async (_, i) =>
-					loadClient(
+				Array.from({ length: options.numberOfClients }, async (_, i) => {
+					const clientVersion = getInitialClientVersion(options, i);
+					return loadClient(
 						containerRuntimeFactory,
 						initialClient,
-						model.factory,
+						getFactoryForVersion(model, options, clientVersion),
 						makeFriendlyClientId(random, i),
 						options,
 						options.clientJoinOptions?.stashableClientProbability
 							? random.bool(options.clientJoinOptions.stashableClientProbability)
 							: false,
-					),
-				),
+						clientVersion,
+					);
+				}),
 			);
 	const summarizerClient = initialClient;
 	const initialState: DDSFuzzTestState<TChannelFactory> = {
@@ -1739,6 +1960,11 @@ export function createSuite<
 	TChannelFactory extends IChannelFactory,
 	TOperation extends BaseOperation,
 >(model: DDSFuzzHarnessModel<TChannelFactory, TOperation>, options: InternalOptions): void {
+	validateClientVersioningOptions(options);
+	const modelForSuite: DDSFuzzHarnessModel<TChannelFactory, TOperation> = {
+		...model,
+		workloadName: getVersionedWorkloadName(model.workloadName, options),
+	};
 	const describeFuzz = createFuzzDescribe({ defaultTestCount: options.defaultTestCount });
 
 	if (options.forceGlobalSeed !== undefined && options.skip.size === 0) {
@@ -1749,15 +1975,15 @@ export function createSuite<
 		);
 	}
 
-	describeFuzz(model.workloadName, ({ testCount, stressMode }) => {
+	describeFuzz(modelForSuite.workloadName, ({ testCount, stressMode }) => {
 		before(() => {
 			if (options.saveFailures !== false) {
-				mkdirSync(getSaveDirectory(options.saveFailures.directory, model), {
+				mkdirSync(getSaveDirectory(options.saveFailures.directory, modelForSuite), {
 					recursive: true,
 				});
 			}
 			if (options.saveSuccesses !== false) {
-				mkdirSync(getSaveDirectory(options.saveSuccesses.directory, model), {
+				mkdirSync(getSaveDirectory(options.saveSuccesses.directory, modelForSuite), {
 					recursive: true,
 				});
 			}
@@ -1765,13 +1991,14 @@ export function createSuite<
 
 		const seeds = generateTestSeeds(testCount, stressMode);
 		for (const seed of seeds) {
-			runTest(model, options, seed, getSaveInfo(model, options, seed));
+			runTest(modelForSuite, options, seed, getSaveInfo(modelForSuite, options, seed));
 		}
 
 		if (options.replay !== undefined) {
-			describe.only(`replay from file`, () => {
+			const label = getClientVersioningLabel(options);
+			describe.only(label === "" ? "replay from file" : `replay from file ${label}`, () => {
 				for (const seed of normalizeSeedOption(options.replay)) {
-					const saveInfo = getSaveInfo(model, options, seed);
+					const saveInfo = getSaveInfo(modelForSuite, options, seed);
 					assert(
 						saveInfo.saveOnFailure !== false,
 						"Cannot replay a file without a directory to save files in!",
@@ -1781,7 +2008,7 @@ export function createSuite<
 					);
 
 					const replayModel = {
-						...model,
+						...modelForSuite,
 						// We lose some type safety here because the options interface isn't generic
 						generatorFactory: (): AsyncGenerator<TOperation, unknown> =>
 							asyncGeneratorFromArray(operations as TOperation[]),
